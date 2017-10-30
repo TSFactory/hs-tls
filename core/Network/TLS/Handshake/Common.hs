@@ -42,8 +42,8 @@ handshakeFailed :: TLSError -> IO ()
 handshakeFailed err = throwIO $ HandshakeFailed err
 
 errorToAlert :: TLSError -> Packet
-errorToAlert (Error_Protocol (_, _, ad)) = Alert [(AlertLevel_Fatal, ad)]
-errorToAlert _                           = Alert [(AlertLevel_Fatal, InternalError)]
+errorToAlert (Error_Protocol (_, _, ad, _)) = Alert [(AlertLevel_Fatal, ad)]
+errorToAlert _                              = Alert [(AlertLevel_Fatal, InternalError)]
 
 unexpected :: String -> Maybe [Char] -> IO a
 unexpected msg expected = throwCore $ Error_Packet_unexpected msg (maybe "" (" expected: " ++) expected)

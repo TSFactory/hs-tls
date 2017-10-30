@@ -93,7 +93,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
         established <- ctxEstablished ctx
         eof <- ctxEOF ctx
         when (established && not eof) $
-            throwCore $ Error_Protocol ("renegotiation is not allowed", False, NoRenegotiation)
+            throwCore $ Error_Protocol ("renegotiation is not allowed", False, NoRenegotiation, Nothing)
     -- check if policy allow this new handshake to happens
     handshakeAuthorized <- withMeasure ctx (onNewHandshake $ serverHooks sparams)
     unless handshakeAuthorized (throwCore $ Error_HandshakePolicy "server: handshake denied")
@@ -103,7 +103,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     processHandshake ctx clientHello
 
     -- rejecting SSL2. RFC 6176
-    when (clientVersion == SSL2) $ throwCore $ Error_Protocol ("SSL 2.0 is not supported", True, ProtocolVersion)
+    when (clientVersion == SSL2) $ throwCore $ Error_Protocol ("SSL 2.0 is not supported", True, ProtocolVersion, Nothing)
     -- rejecting SSL3. RFC 7568
     -- when (clientVersion == SSL3) $ throwCore $ Error_Protocol ("SSL 3.0 is not supported", True, ProtocolVersion)
 
@@ -112,14 +112,14 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     when (supportedFallbackScsv (ctxSupported ctx) &&
           (0x5600 `elem` ciphers) &&
           clientVersion /= maxBound) $
-        throwCore $ Error_Protocol ("fallback is not allowed", True, InappropriateFallback)
+        throwCore $ Error_Protocol ("fallback is not allowed", True, InappropriateFallback, Nothing)
     chosenVersion <- case findHighestVersionFrom clientVersion (supportedVersions $ ctxSupported ctx) of
-                        Nothing -> throwCore $ Error_Protocol ("client version " ++ show clientVersion ++ " is not supported", True, ProtocolVersion)
+                        Nothing -> throwCore $ Error_Protocol ("client version " ++ show clientVersion ++ " is not supported", True, ProtocolVersion, Nothing)
                         Just v  -> return v
 
     -- If compression is null, commonCompressions should be [0].
     when (null commonCompressions) $ throwCore $
-        Error_Protocol ("no compression in common with the client", True, HandshakeFailure)
+        Error_Protocol ("no compression in common with the client", True, HandshakeFailure, Nothing)
 
     -- SNI (Server Name Indication)
     let serverName = case extensionLookup extensionID_ServerName exts >>= extensionDecode False of
@@ -200,7 +200,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     -- creds, check now before calling onCipherChoosing, which does not handle
     -- empty lists.
     when (null ciphersFilteredVersion) $ throwCore $
-        Error_Protocol ("no cipher in common with the client", True, HandshakeFailure)
+        Error_Protocol ("no cipher in common with the client", True, HandshakeFailure, Nothing)
 
     let usedCipher = (onCipherChoosing $ serverHooks sparams) chosenVersion ciphersFilteredVersion
 
@@ -210,7 +210,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
                 CipherKeyExchange_DHE_RSA   -> return $ credentialsFindForSigning RSA signatureCreds
                 CipherKeyExchange_DHE_DSS   -> return $ credentialsFindForSigning DSS signatureCreds
                 CipherKeyExchange_ECDHE_RSA -> return $ credentialsFindForSigning RSA signatureCreds
-                _                           -> throwCore $ Error_Protocol ("key exchange algorithm not implemented", True, HandshakeFailure)
+                _                           -> throwCore $ Error_Protocol ("key exchange algorithm not implemented", True, HandshakeFailure, Nothing)
 
     resumeSessionData <- case clientSession of
             (Session (Just clientSessionId)) ->
@@ -250,7 +250,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
             | otherwise                                     = m
 
 
-handshakeServerWith _ _ _ = throwCore $ Error_Protocol ("unexpected handshake message received in handshakeServerWith", True, HandshakeFailure)
+handshakeServerWith _ _ _ = throwCore $ Error_Protocol ("unexpected handshake message received in handshakeServerWith", True, HandshakeFailure, Nothing)
 
 doHandshake :: ServerParams -> Maybe Credential -> Context -> Version -> Cipher
             -> Compression -> Session -> Maybe SessionData
@@ -418,7 +418,7 @@ doHandshake sparams mcred ctx chosenVersion usedCipher usedCompression clientSes
         generateSKX_ECDHE sigAlg = do
             let possibleGroups = negotiatedGroupsInCommon ctx exts
             grp <- case possibleGroups of
-                     []  -> throwCore $ Error_Protocol ("no common group", True, HandshakeFailure)
+                     []  -> throwCore $ Error_Protocol ("no common group", True, HandshakeFailure, Nothing)
                      g:_ -> return g
             serverParams <- setup_ECDHE grp
             mhashSig <- decideHashSig sigAlg
@@ -509,14 +509,14 @@ recvClientData sparams ctx = runRecvState ctx (RecvStateHandshake processClientC
                             -- chain to the context.
                             Just certs <- usingHState ctx getClientCertChain
                             usingState_ ctx $ setClientCertificateChain certs
-                        else throwCore $ Error_Protocol ("verification failed", True, BadCertificate)
+                        else throwCore $ Error_Protocol ("verification failed", True, BadCertificate, Nothing)
             return $ RecvStateNext expectChangeCipher
 
         processCertificateVerify p = do
             chain <- usingHState ctx getClientCertChain
             case chain of
                 Just cc | isNullCertificateChain cc -> return ()
-                        | otherwise                 -> throwCore $ Error_Protocol ("cert verify message missing", True, UnexpectedMessage)
+                        | otherwise                 -> throwCore $ Error_Protocol ("cert verify message missing", True, UnexpectedMessage, Nothing)
                 Nothing -> return ()
             expectChangeCipher p
 
@@ -526,7 +526,7 @@ recvClientData sparams ctx = runRecvState ctx (RecvStateHandshake processClientC
                 PubKeyRSA _   -> return RSA
                 PubKeyDSA _   -> return DSS
                 PubKeyEC  _   -> return ECDSA
-                _             -> throwCore $ Error_Protocol ("unsupported remote public key type", True, HandshakeFailure)
+                _             -> throwCore $ Error_Protocol ("unsupported remote public key type", True, HandshakeFailure, Nothing)
 
         expectChangeCipher ChangeCipherSpec = do
             return $ RecvStateHandshake $ expectFinish
@@ -538,7 +538,7 @@ recvClientData sparams ctx = runRecvState ctx (RecvStateHandshake processClientC
 
         checkValidClientCertChain msg = do
             chain <- usingHState ctx getClientCertChain
-            let throwerror = Error_Protocol (msg , True, UnexpectedMessage)
+            let throwerror = Error_Protocol (msg , True, UnexpectedMessage, Nothing)
             case chain of
                 Nothing -> throwCore throwerror
                 Just cc | isNullCertificateChain cc -> throwCore throwerror

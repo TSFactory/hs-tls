@@ -65,7 +65,7 @@ getCipherData (Record pt ver _) cdata = do
             return (if cver < TLS10 then True else B.replicate (B.length pad) (fromIntegral b) `bytesEq` pad)
 
     unless (macValid &&! paddingValid) $ do
-        throwError $ Error_Protocol ("bad record mac", True, BadRecordMac)
+        throwError $ Error_Protocol ("bad record mac", True, BadRecordMac, Nothing)
 
     return $ cipherDataContent cdata
 
@@ -137,13 +137,13 @@ decryptData ver record econtent tst = decryptOf (cstKey cst)
                 (content, authTag2) = decryptF nonce econtent' ad
 
             when (AuthTag (B.convert authTag) /= authTag2) $
-                throwError $ Error_Protocol ("bad record mac", True, BadRecordMac)
+                throwError $ Error_Protocol ("bad record mac", True, BadRecordMac, Nothing)
 
             modify incrRecordState
             return content
 
         decryptOf BulkStateUninitialized =
-            throwError $ Error_Protocol ("decrypt state uninitialized", True, InternalError)
+            throwError $ Error_Protocol ("decrypt state uninitialized", True, InternalError, Nothing)
 
         get3 s ls = maybe (throwError $ Error_Packet "record bad format") return $ partition3 s ls
         get2 s (d1,d2) = get3 s (d1,d2,0) >>= \(r1,r2,_) -> return (r1,r2)

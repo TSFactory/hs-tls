@@ -82,7 +82,7 @@ recvRecord compatSSLv2 ctx
                       Right content ->
                         either (return . Left) (flip getRecord content) $ decodeDeprecatedHeader readlen content
 #endif
-              maximumSizeExceeded = Error_Protocol ("record exceeding maximum size", True, RecordOverflow)
+              maximumSizeExceeded = Error_Protocol ("record exceeding maximum size", True, RecordOverflow, Nothing)
               getRecord :: Header -> ByteString -> IO (Either TLSError (Record Plaintext))
               getRecord header content = do
                     withLog ctx $ \logging -> loggingIORecv logging header content

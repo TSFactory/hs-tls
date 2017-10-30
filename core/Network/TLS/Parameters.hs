@@ -327,7 +327,7 @@ data ServerHooks = ServerHooks
 defaultServerHooks :: ServerHooks
 defaultServerHooks = ServerHooks
     { onCipherChoosing       = \_ -> head
-    , onClientCertificate    = \_ -> return $ CertificateUsageReject $ CertificateRejectOther "no client certificates expected"
+    , onClientCertificate    = \_ -> return $ CertificateUsageReject $ CertificateRejectOther "no client certificates expected" Nothing
     , onUnverifiedClientCert = return False
     , onServerNameIndication = \_ -> return mempty
     , onNewHandshake         = \_ -> return True

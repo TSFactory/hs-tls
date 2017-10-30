@@ -58,7 +58,7 @@ processHandshake ctx hs = do
         processClientExtension (ExtensionRaw 0xff01 content) | secureRenegotiation = do
             v <- getVerifiedData ClientRole
             let bs = extensionEncode (SecureRenegotiation v Nothing)
-            unless (bs `bytesEq` content) $ throwError $ Error_Protocol ("client verified data not matching: " ++ show v ++ ":" ++ show content, True, HandshakeFailure)
+            unless (bs `bytesEq` content) $ throwError $ Error_Protocol ("client verified data not matching: " ++ show v ++ ":" ++ show content, True, HandshakeFailure, Nothing)
 
             setSecureRenegotiation True
         -- unknown extensions
@@ -67,7 +67,7 @@ processHandshake ctx hs = do
         processCertificates :: Role -> CertificateChain -> IO ()
         processCertificates ServerRole (CertificateChain []) = return ()
         processCertificates ClientRole (CertificateChain []) =
-            throwCore $ Error_Protocol ("server certificate missing", True, HandshakeFailure)
+            throwCore $ Error_Protocol ("server certificate missing", True, HandshakeFailure, Nothing)
         processCertificates _ (CertificateChain (c:_)) =
             usingHState ctx $ setPublicKey pubkey
           where pubkey = certPubKey $ getCertificate c
@@ -101,7 +101,7 @@ processClientKeyXchg ctx (CKX_DH clientDHValue) = do
 processClientKeyXchg ctx (CKX_ECDH bytes) = do
     ServerECDHParams grp _ <- usingHState ctx getServerECDHParams
     case decodeGroupPublic grp bytes of
-      Left _ -> throwCore $ Error_Protocol ("client public key cannot be decoded", True, HandshakeFailure)
+      Left _ -> throwCore $ Error_Protocol ("client public key cannot be decoded", True, HandshakeFailure, Nothing)
       Right clipub -> do
           srvpri <- usingHState ctx getECDHPrivate
           case groupGetShared clipub srvpri of
@@ -109,14 +109,14 @@ processClientKeyXchg ctx (CKX_ECDH bytes) = do
                   rver <- usingState_ ctx getVersion
                   role <- usingState_ ctx isClientContext
                   usingHState ctx $ setMasterSecretFromPre rver role premaster
-              Nothing -> throwCore $ Error_Protocol ("cannote generate a shared secret on ECDH", True, HandshakeFailure)
+              Nothing -> throwCore $ Error_Protocol ("cannote generate a shared secret on ECDH", True, HandshakeFailure, Nothing)
 
 processClientFinished :: Context -> FinishedData -> IO ()
 processClientFinished ctx fdata = do
     (cc,ver) <- usingState_ ctx $ (,) <$> isClientContext <*> getVersion
     expected <- usingHState ctx $ getHandshakeDigest ver $ invertRole cc
     when (expected /= fdata) $ do
-        throwCore $ Error_Protocol("bad record mac", True, BadRecordMac)
+        throwCore $ Error_Protocol("bad record mac", True, BadRecordMac, Nothing)
     usingState_ ctx $ updateVerifiedData ServerRole fdata
     return ()
 

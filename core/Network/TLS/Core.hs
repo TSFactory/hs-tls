@@ -87,7 +87,7 @@ recvData ctx = liftIO $ do
   where onError Error_EOF = -- Not really an error.
             return B.empty
 
-        onError err@(Error_Protocol (reason,fatal,desc)) =
+        onError err@(Error_Protocol (reason,fatal,desc, _)) =
             terminate err (if fatal then AlertLevel_Fatal else AlertLevel_Warning) desc reason
         onError err =
             terminate err AlertLevel_Fatal InternalError (show err)
@@ -100,7 +100,7 @@ recvData ctx = liftIO $ do
         process (Alert [(AlertLevel_Warning, CloseNotify)]) = tryBye >> setEOF ctx >> return B.empty
         process (Alert [(AlertLevel_Fatal, desc)]) = do
             setEOF ctx
-            E.throwIO (Terminated True ("received fatal error: " ++ show desc) (Error_Protocol ("remote side fatal error", True, desc)))
+            E.throwIO (Terminated True ("received fatal error: " ++ show desc) (Error_Protocol ("remote side fatal error", True, desc, Nothing)))
 
         -- when receiving empty appdata, we just retry to get some data.
         process (AppData "") = recvData ctx

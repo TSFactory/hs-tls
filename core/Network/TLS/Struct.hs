@@ -65,7 +65,7 @@ import qualified Data.ByteString as B (length)
 import Data.Word
 import Data.X509 (CertificateChain, DistinguishedName)
 import Data.Typeable
-import Control.Exception (Exception(..))
+import Control.Exception (Exception(..), SomeException)
 import Network.TLS.Types
 import Network.TLS.Crypto
 import Network.TLS.Util.Serialization
@@ -138,14 +138,14 @@ data ProtocolType =
 -- | TLSError that might be returned through the TLS stack
 data TLSError =
       Error_Misc String        -- ^ mainly for instance of Error
-    | Error_Protocol (String, Bool, AlertDescription)
+    | Error_Protocol (String, Bool, AlertDescription, Maybe SomeException)
     | Error_Certificate String
     | Error_HandshakePolicy String -- ^ handshake policy failed.
     | Error_EOF
     | Error_Packet String
     | Error_Packet_unexpected String String
     | Error_Packet_Parsing String
-    deriving (Eq, Show, Typeable)
+    deriving (Show, Typeable)
 
 #if MIN_VERSION_mtl(2,2,1)
 #else
@@ -164,7 +164,7 @@ data TLSException =
     | HandshakeFailed TLSError        -- ^ Handshake failed for the reason attached
     | ConnectionNotEstablished        -- ^ Usage error when the connection has not been established
                                       --   and the user is trying to send or receive data
-    deriving (Show,Eq,Typeable)
+    deriving (Show,Typeable)
 
 instance Exception TLSException
 

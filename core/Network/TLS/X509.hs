@@ -25,6 +25,7 @@ module Network.TLS.X509
     , wrapCertificateChecks
     ) where
 
+import Control.Exception (SomeException)
 import Data.X509
 import Data.X509.Validation
 import Data.X509.CertificateStore
@@ -41,14 +42,14 @@ data CertificateRejectReason =
           CertificateRejectExpired
         | CertificateRejectRevoked
         | CertificateRejectUnknownCA
-        | CertificateRejectOther String
-        deriving (Show,Eq)
+        | CertificateRejectOther String (Maybe SomeException)
+        deriving (Show)
 
 -- | Certificate Usage callback possible returns values.
 data CertificateUsage =
           CertificateUsageAccept                         -- ^ usage of certificate accepted
         | CertificateUsageReject CertificateRejectReason -- ^ usage of certificate rejected
-        deriving (Show,Eq)
+        deriving (Show)
 
 wrapCertificateChecks :: [FailedReason] -> CertificateUsage
 wrapCertificateChecks [] = CertificateUsageAccept
@@ -56,4 +57,4 @@ wrapCertificateChecks l
     | Expired `elem` l   = CertificateUsageReject $ CertificateRejectExpired
     | InFuture `elem` l  = CertificateUsageReject $ CertificateRejectExpired
     | UnknownCA `elem` l = CertificateUsageReject $ CertificateRejectUnknownCA
-    | otherwise          = CertificateUsageReject $ CertificateRejectOther (show l)
+    | otherwise          = CertificateUsageReject $ CertificateRejectOther (show l) Nothing
