@@ -36,9 +36,10 @@ type Credential = (CertificateChain, PrivKey)
 
 newtype Credentials = Credentials [Credential]
 
+instance Semigroup Credentials where
+    Credentials l1 <> Credentials l2 = Credentials (l1 ++ l2)
 instance Monoid Credentials where
     mempty = Credentials []
-    mappend (Credentials l1) (Credentials l2) = Credentials (l1 ++ l2)
 
 -- | try to create a new credential object from a public certificate
 -- and the associated private key that are stored on the filesystem
