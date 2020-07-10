@@ -173,6 +173,18 @@ data TLSError =
     | Error_Packet_Parsing String
     deriving (Show, Typeable)
 
+instance Eq TLSError where
+    Error_Misc s1 == Error_Misc s2  =  s1 == s2
+    Error_Protocol (s1, b1, a1, m1) == Error_Protocol (s2, b2, a2, m2) =
+        s1 == s2 && b1 == b2 && a1 == a2 && isJust m1 == isJust m2
+    Error_Certificate s1 == Error_Certificate s2  =  s1 == s2
+    Error_HandshakePolicy s1 == Error_HandshakePolicy s2  =  s1 == s2
+    Error_EOF == Error_EOF = True
+    Error_Packet s1 == Error_Packet s2  =  s1 == s2
+    Error_Packet_unexpected s1 s'1 == Error_Packet_unexpected s2 s'2  =  s1 == s2 && s'1 == s'2
+    Error_Packet_Parsing s1 == Error_Packet_Parsing s2  =  s1 == s2
+    _ == _ = False
+
 #if MIN_VERSION_mtl(2,2,1)
 #else
 instance Error TLSError where
