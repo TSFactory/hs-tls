@@ -1,32 +1,30 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Disable this warning so we can still test deprecated functionality.
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
+
+import Control.Concurrent
+import qualified Control.Exception as E
 import Crypto.Random
-import Network.BSD
-import Network.Socket (socket, Family(..), SocketType(..), close, SockAddr(..), bind, listen, accept, iNADDR_ANY)
-import qualified Network.Socket as S
-import Network.TLS
-import Network.TLS.Extra.Cipher
-import System.Console.GetOpt
-import System.IO
-import System.Timeout
-import qualified Data.ByteString.Lazy.Char8 as LC
-import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString as B
-import Control.Monad
+import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Lazy.Char8 as LC
+import Data.Default.Class
+import Data.X509.CertificateStore
+import Network.Socket (socket, close, bind, listen, accept)
+import qualified Network.Socket as S
+import Network.TLS.SessionManager
+import System.Console.GetOpt
 import System.Environment
 import System.Exit
-import System.X509
-import Data.X509.CertificateStore
+import System.IO
+import System.Timeout
 
-import Data.Default.Class
-import Data.IORef
-import Data.Monoid
-import Data.List (find)
-import Data.Maybe (isJust, mapMaybe)
+import Network.TLS
+import Network.TLS.Extra.Cipher
 
 import Common
 import HexDump
+import Imports
 
 defaultBenchAmount = 1024 * 1024
 defaultTimeout = 2000
@@ -51,36 +49,32 @@ runTLS debug ioDebug params cSock f = do
                                 }
             | otherwise = logging
 
-sessionRef ref = SessionManager
-    { sessionEstablish  = \sid sdata -> writeIORef ref (sid,sdata)
-    , sessionResume     = \sid       -> readIORef ref >>= \(s,d) -> if s == sid then return (Just d) else return Nothing
-    , sessionInvalidate = \_         -> return ()
-    }
-
-getDefaultParams :: [Flag] -> CertificateStore -> IORef (SessionID, SessionData) -> Credential -> IO ServerParams
-getDefaultParams flags store sStorage cred = do
+getDefaultParams :: [Flag] -> CertificateStore -> SessionManager -> Credential -> Bool -> IO ServerParams
+getDefaultParams flags store smgr cred rtt0accept = do
     dhParams <- case getDHParams flags of
         Nothing   -> return Nothing
         Just name -> readDHParams name
 
-    return ServerParams
+    return def
         { serverWantClientCert = False
         , serverCACertificates = []
         , serverDHEParams = dhParams
-        , serverShared = def { sharedSessionManager  = sessionRef sStorage
+        , serverShared = def { sharedSessionManager  = smgr
                              , sharedCAStore         = store
                              , sharedValidationCache = validateCache
                              , sharedCredentials     = Credentials [cred]
                              }
-        , serverHooks = def
         , serverSupported = def { supportedVersions = supportedVers
                                 , supportedCiphers = myCiphers
-                                , supportedClientInitiatedRenegotiation = allowRenegotiation }
+                                , supportedGroups = getGroups flags
+                                , supportedClientInitiatedRenegotiation = allowRenegotiation
+                                }
         , serverDebug = def { debugSeed      = foldl getDebugSeed Nothing flags
                             , debugPrintSeed = if DebugPrintSeed `elem` flags
                                                     then (\seed -> putStrLn ("seed: " ++ show (seedToInteger seed)))
                                                     else (\_ -> return ())
                             }
+        , serverEarlyDataSize = if rtt0accept then 2048 else 0
         }
     where
             validateCache
@@ -116,36 +110,51 @@ getDefaultParams flags store sStorage cred = do
             getDebugSeed acc _                = acc
 
             tlsConnectVer
+                | Tls13 `elem` flags = TLS13
                 | Tls12 `elem` flags = TLS12
                 | Tls11 `elem` flags = TLS11
                 | Ssl3  `elem` flags = SSL3
                 | Tls10 `elem` flags = TLS10
-                | otherwise          = TLS12
+                | otherwise          = TLS13
             supportedVers
                 | NoVersionDowngrade `elem` flags = [tlsConnectVer]
                 | otherwise = filter (<= tlsConnectVer) allVers
-            allVers = [SSL3, TLS10, TLS11, TLS12]
+            allVers = [TLS13, TLS12, TLS11, TLS10, SSL3]
             validateCert = not (NoValidateCert `elem` flags)
             allowRenegotiation = AllowRenegotiation `elem` flags
 
-data Flag = Verbose | Debug | IODebug | NoValidateCert | Session | Http11
-          | Ssl3 | Tls10 | Tls11 | Tls12
+getGroups flags = case getGroup >>= readGroups of
+    Nothing     -> defaultGroups
+    Just []     -> defaultGroups
+    Just groups -> groups
+  where
+    defaultGroups = supportedGroups def
+    getGroup = foldl f Nothing flags
+      where f _   (Group g)  = Just g
+            f acc _          = acc
+
+data Flag = Verbose | Debug | IODebug | NoValidateCert | Http11
+          | Ssl3 | Tls10 | Tls11 | Tls12 | Tls13
           | NoVersionDowngrade
           | AllowRenegotiation
           | Output String
           | Timeout String
           | BogusCipher String
+          | TrustAnchor String
           | BenchSend
           | BenchRecv
           | BenchData String
           | UseCipher String
           | ListCiphers
+          | ListGroups
           | ListDHParams
           | Certificate String
           | Key String
           | DHParams String
+          | Rtt0
           | DebugSeed String
           | DebugPrintSeed
+          | Group String
           | Help
           deriving (Show,Eq)
 
@@ -154,15 +163,18 @@ options =
     [ Option ['v']  ["verbose"] (NoArg Verbose) "verbose output on stdout"
     , Option ['d']  ["debug"]   (NoArg Debug) "TLS debug output on stdout"
     , Option []     ["io-debug"] (NoArg IODebug) "TLS IO debug output on stdout"
-    , Option ['s']  ["session"] (NoArg Session) "try to resume a session"
+    , Option ['Z']  ["zerortt"] (NoArg Rtt0) "accept TLS 1.3 0RTT data"
     , Option ['O']  ["output"]  (ReqArg Output "stdout") "output "
+    , Option ['g']  ["group"]  (ReqArg Group "group") "group"
     , Option ['t']  ["timeout"] (ReqArg Timeout "timeout") "timeout in milliseconds (2s by default)"
     , Option []     ["no-validation"] (NoArg NoValidateCert) "disable certificate validation"
+    , Option []     ["trust-anchor"] (ReqArg TrustAnchor "pem-or-dir") "use provided CAs instead of system certificate store"
     , Option []     ["http1.1"] (NoArg Http11) "use http1.1 instead of http1.0"
     , Option []     ["ssl3"]    (NoArg Ssl3) "use SSL 3.0"
     , Option []     ["tls10"]   (NoArg Tls10) "use TLS 1.0"
     , Option []     ["tls11"]   (NoArg Tls11) "use TLS 1.1"
-    , Option []     ["tls12"]   (NoArg Tls12) "use TLS 1.2 (default)"
+    , Option []     ["tls12"]   (NoArg Tls12) "use TLS 1.2"
+    , Option []     ["tls13"]   (NoArg Tls13) "use TLS 1.3 (default)"
     , Option []     ["bogocipher"] (ReqArg BogusCipher "cipher-id") "add a bogus cipher id for testing"
     , Option ['x']  ["no-version-downgrade"] (NoArg NoVersionDowngrade) "do not allow version downgrade"
     , Option []     ["allow-renegotiation"] (NoArg AllowRenegotiation) "allow client-initiated renegotiation"
@@ -172,6 +184,7 @@ options =
     , Option []     ["bench-data"] (ReqArg BenchData "amount") "amount of data to benchmark with"
     , Option []     ["use-cipher"] (ReqArg UseCipher "cipher-id") "use a specific cipher"
     , Option []     ["list-ciphers"] (NoArg ListCiphers) "list all ciphers supported and exit"
+    , Option []     ["list-groups"] (NoArg ListGroups) "list all groups supported and exit"
     , Option []     ["list-dhparams"] (NoArg ListDHParams) "list all DH parameters supported and exit"
     , Option []     ["certificate"] (ReqArg Certificate "certificate") "certificate file"
     , Option []     ["debug-seed"] (ReqArg DebugSeed "debug-seed") "debug: set a specific seed for randomness"
@@ -191,9 +204,10 @@ loadCred _       Nothing =
     error "missing credential certificate"
 
 runOn (sStorage, certStore) flags port = do
-    sock <- socket AF_INET Stream defaultProtocol
+    ai <- makeAddrInfo Nothing port
+    sock <- socket (addrFamily ai) (addrSocketType ai) (addrProtocol ai)
     S.setSocketOption sock S.ReuseAddr 1
-    let sockaddr = SockAddrInet port iNADDR_ANY
+    let sockaddr = addrAddress ai
     bind sock sockaddr
     listen sock 10
     runOn' sock
@@ -204,20 +218,21 @@ runOn (sStorage, certStore) flags port = do
           | BenchRecv `elem` flags = runBench False sock
           | otherwise              = do
               --certCredRequest <- getCredRequest
-              doTLS sock
-              when (Session `elem` flags) $ doTLS sock
+              E.bracket (maybe (return stdout) (flip openFile AppendMode) getOutput)
+                        (\out -> when (isJust getOutput) $ hClose out)
+                        (doTLS sock)
         runBench isSend sock = do
             (cSock, cAddr) <- accept sock
             putStrLn ("connection from " ++ show cAddr)
             cred <- loadCred getKey getCertificate
-            params <- getDefaultParams flags certStore sStorage cred
+            params <- getDefaultParams flags certStore sStorage cred False
             runTLS False False params cSock $ \ctx -> do
                 handshake ctx
                 if isSend
                     then loopSendData getBenchAmount ctx
                     else loopRecvData getBenchAmount ctx
                 bye ctx
-            close cSock
+              `E.finally` close cSock
           where
             dataSend = BC.replicate 4096 'a'
             loopSendData bytes ctx
@@ -232,25 +247,27 @@ runOn (sStorage, certStore) flags port = do
                     d <- recvData ctx
                     loopRecvData (bytes - B.length d) ctx
 
-        doTLS sock = do
+        doTLS sock out = do
             (cSock, cAddr) <- accept sock
             putStrLn ("connection from " ++ show cAddr)
-            out <- maybe (return stdout) (flip openFile AppendMode) getOutput
 
             cred <- loadCred getKey getCertificate
-            params <- getDefaultParams flags certStore sStorage cred
+            let rtt0accept = Rtt0 `elem` flags
+            params <- getDefaultParams flags certStore sStorage cred rtt0accept
 
-            runTLS (Debug `elem` flags)
-                   (IODebug `elem` flags)
-                   params cSock $ \ctx -> do
-                handshake ctx
-                when (Verbose `elem` flags) $ printHandshakeInfo ctx
-                loopRecv out ctx
-                --sendData ctx $ query
-                bye ctx
-                return ()
-            close cSock
-            when (isJust getOutput) $ hClose out
+            void $ forkIO $
+                runTLS (Debug `elem` flags)
+                       (IODebug `elem` flags)
+                       params cSock $ \ctx -> do
+                    handshake ctx
+                    when (Verbose `elem` flags) $ printHandshakeInfo ctx
+                    loopRecv out ctx
+                    --sendData ctx $ query
+                    bye ctx
+                    return ()
+                  `E.finally` close cSock
+            doTLS sock out
+
         loopRecv out ctx = do
             d <- timeout (timeoutMs * 1000) (recvData ctx) -- 2s per recv
             case d of
@@ -293,6 +310,10 @@ runOn (sStorage, certStore) flags port = do
                                             Just i  -> i
                 f acc _              = acc
 
+getTrustAnchors flags = getCertificateStore (foldr getPaths [] flags)
+  where getPaths (TrustAnchor path) acc = path : acc
+        getPaths _                  acc = acc
+
 printUsage =
     putStrLn $ usageInfo "usage: simpleserver [opts] [port]\n\n\t(port default to: 443)\noptions:\n" options
 
@@ -315,8 +336,12 @@ main = do
         printDHParams
         exitSuccess
 
-    certStore <- getSystemCertificateStore
-    sStorage  <- newIORef (error "storage ioref undefined")
+    when (ListGroups `elem` opts) $ do
+        printGroups
+        exitSuccess
+
+    certStore <- getTrustAnchors opts
+    sStorage  <- newSessionManager defaultConfig
     case other of
         []     -> runOn (sStorage, certStore) opts 443
         [port] -> runOn (sStorage, certStore) opts (fromInteger $ read port)

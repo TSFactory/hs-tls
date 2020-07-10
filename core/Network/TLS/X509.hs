@@ -23,6 +23,7 @@ module Network.TLS.X509
     , FailedReason
     , ServiceID
     , wrapCertificateChecks
+    , pubkeyType
     ) where
 
 import Control.Exception (SomeException)
@@ -42,6 +43,7 @@ data CertificateRejectReason =
           CertificateRejectExpired
         | CertificateRejectRevoked
         | CertificateRejectUnknownCA
+        | CertificateRejectAbsent
         | CertificateRejectOther String (Maybe SomeException)
         deriving (Show)
 
@@ -54,7 +56,12 @@ data CertificateUsage =
 wrapCertificateChecks :: [FailedReason] -> CertificateUsage
 wrapCertificateChecks [] = CertificateUsageAccept
 wrapCertificateChecks l
-    | Expired `elem` l   = CertificateUsageReject $ CertificateRejectExpired
-    | InFuture `elem` l  = CertificateUsageReject $ CertificateRejectExpired
-    | UnknownCA `elem` l = CertificateUsageReject $ CertificateRejectUnknownCA
+    | Expired `elem` l   = CertificateUsageReject   CertificateRejectExpired
+    | InFuture `elem` l  = CertificateUsageReject   CertificateRejectExpired
+    | UnknownCA `elem` l = CertificateUsageReject   CertificateRejectUnknownCA
+    | SelfSigned `elem` l = CertificateUsageReject  CertificateRejectUnknownCA
+    | EmptyChain `elem` l = CertificateUsageReject  CertificateRejectAbsent
     | otherwise          = CertificateUsageReject $ CertificateRejectOther (show l) Nothing
+
+pubkeyType :: PubKey -> String
+pubkeyType = show . pubkeyToAlg

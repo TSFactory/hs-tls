@@ -5,6 +5,7 @@
 -- Stability   : experimental
 -- Portability : unknown
 --
+{-# LANGUAGE CPP #-}
 module Network.TLS.Credentials
     ( Credential
     , Credentials(..)
@@ -19,12 +20,9 @@ module Network.TLS.Credentials
     , credentialMatchesHashSignatures
     ) where
 
-import Data.ByteString (ByteString)
-import Data.Monoid
-import Data.Maybe (catMaybes)
-import Data.List (find)
 import Network.TLS.Crypto
 import Network.TLS.X509
+import Network.TLS.Imports
 import Data.X509.File
 import Data.X509.Memory
 import Data.X509
@@ -38,8 +36,12 @@ newtype Credentials = Credentials [Credential]
 
 instance Semigroup Credentials where
     Credentials l1 <> Credentials l2 = Credentials (l1 ++ l2)
+
 instance Monoid Credentials where
     mempty = Credentials []
+#if !(MIN_VERSION_base(4,11,0))
+    mappend (Credentials l1) (Credentials l2) = Credentials (l1 ++ l2)
+#endif
 
 -- | try to create a new credential object from a public certificate
 -- and the associated private key that are stored on the filesystem
@@ -78,7 +80,7 @@ credentialLoadX509ChainFromMemory :: ByteString
                   -> [ByteString]
                   -> ByteString
                   -> Either String Credential
-credentialLoadX509ChainFromMemory certData chainData privateData = do
+credentialLoadX509ChainFromMemory certData chainData privateData =
     let x509   = readSignedObjectFromMemory certData
         chains = map readSignedObjectFromMemory chainData
         keys   = readKeyFileFromMemory privateData
@@ -86,14 +88,14 @@ credentialLoadX509ChainFromMemory certData chainData privateData = do
             []    -> Left "no keys found"
             (k:_) -> Right (CertificateChain . concat $ x509 : chains, k)
 
-credentialsListSigningAlgorithms :: Credentials -> [DigitalSignatureAlg]
-credentialsListSigningAlgorithms (Credentials l) = catMaybes $ map credentialCanSign l
+credentialsListSigningAlgorithms :: Credentials -> [KeyExchangeSignatureAlg]
+credentialsListSigningAlgorithms (Credentials l) = mapMaybe credentialCanSign l
 
-credentialsFindForSigning :: DigitalSignatureAlg -> Credentials -> Maybe Credential
-credentialsFindForSigning sigAlg (Credentials l) = find forSigning l
+credentialsFindForSigning :: KeyExchangeSignatureAlg -> Credentials -> Maybe Credential
+credentialsFindForSigning kxsAlg (Credentials l) = find forSigning l
   where forSigning cred = case credentialCanSign cred of
             Nothing  -> False
-            Just sig -> sig == sigAlg
+            Just kxs -> kxs == kxsAlg
 
 credentialsFindForDecrypting :: Credentials -> Maybe Credential
 credentialsFindForDecrypting (Credentials l) = find forEncrypting l
@@ -112,24 +114,24 @@ credentialCanDecrypt (chain, priv) =
                     | KeyUsage_keyEncipherment `elem` flags -> Just ()
                     | otherwise                             -> Nothing
         _                           -> Nothing
-    where cert   = signedObject $ getSigned signed
+    where cert   = getCertificate signed
           pub    = certPubKey cert
           signed = getCertificateChainLeaf chain
 
-credentialCanSign :: Credential -> Maybe DigitalSignatureAlg
+credentialCanSign :: Credential -> Maybe KeyExchangeSignatureAlg
 credentialCanSign (chain, priv) =
     case extensionGet (certExtensions cert) of
-        Nothing    -> findDigitalSignatureAlg (pub, priv)
+        Nothing    -> findKeyExchangeSignatureAlg (pub, priv)
         Just (ExtKeyUsage flags)
-            | KeyUsage_digitalSignature `elem` flags -> findDigitalSignatureAlg (pub, priv)
+            | KeyUsage_digitalSignature `elem` flags -> findKeyExchangeSignatureAlg (pub, priv)
             | otherwise                              -> Nothing
-    where cert   = signedObject $ getSigned signed
+    where cert   = getCertificate signed
           pub    = certPubKey cert
           signed = getCertificateChainLeaf chain
 
 credentialPublicPrivateKeys :: Credential -> (PubKey, PrivKey)
 credentialPublicPrivateKeys (chain, priv) = pub `seq` (pub, priv)
-    where cert   = signedObject $ getSigned signed
+    where cert   = getCertificate signed
           pub    = certPubKey cert
           signed = getCertificateChainLeaf chain
 
@@ -140,9 +142,12 @@ getHashSignature signed =
         SignatureALG hashAlg PubKeyALG_DSA    -> convertHash TLS.SignatureDSS   hashAlg
         SignatureALG hashAlg PubKeyALG_EC     -> convertHash TLS.SignatureECDSA hashAlg
 
-        SignatureALG X509.HashSHA256 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA256)
-        SignatureALG X509.HashSHA384 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA384)
-        SignatureALG X509.HashSHA512 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA512)
+        SignatureALG X509.HashSHA256 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA256)
+        SignatureALG X509.HashSHA384 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA384)
+        SignatureALG X509.HashSHA512 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA512)
+
+        SignatureALG_IntrinsicHash PubKeyALG_Ed25519  -> Just (TLS.HashIntrinsic, TLS.SignatureEd25519)
+        SignatureALG_IntrinsicHash PubKeyALG_Ed448    -> Just (TLS.HashIntrinsic, TLS.SignatureEd448)
 
         _                                     -> Nothing
   where
@@ -154,10 +159,10 @@ getHashSignature signed =
     convertHash sig X509.HashSHA512 = Just (TLS.HashSHA512, sig)
     convertHash _   _               = Nothing
 
--- | Checks whether certificates in the chain comply with a list of
--- hash/signature algorithm pairs.  Currently the verification applies only
--- to the leaf certificate, if it is not self-signed.  This may be extended
--- to additional chain elements in the future.
+-- | Checks whether certificate signatures in the chain comply with a list of
+-- hash/signature algorithm pairs.  Currently the verification applies only to
+-- the signature of the leaf certificate, and when not self-signed.  This may
+-- be extended to additional chain elements in the future.
 credentialMatchesHashSignatures :: [TLS.HashAndSignatureAlgorithm] -> Credential -> Bool
 credentialMatchesHashSignatures hashSigs (chain, _) =
     case chain of
@@ -169,5 +174,5 @@ credentialMatchesHashSignatures hashSigs (chain, _) =
                               Just hs -> hs `elem` hashSigs
 
     isSelfSigned signed =
-        let cert = signedObject $ getSigned signed
+        let cert = getCertificate signed
          in certSubjectDN cert == certIssuerDN cert

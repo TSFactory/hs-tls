@@ -11,10 +11,13 @@ data Group = P256 | P384 | P521 | X25519 | X448
            | FFDHE2048 | FFDHE3072 | FFDHE4096 | FFDHE6144 | FFDHE8192
            deriving (Eq, Show)
 
-availableGroups :: [Group]
-availableGroups = [P256,P384,P521,X25519,X448]
+availableFFGroups :: [Group]
+availableFFGroups = [FFDHE2048,FFDHE3072,FFDHE4096,FFDHE6144,FFDHE8192]
 
--- Digital signature algorithm, in close relation to public/private key types
--- and cipher key exchange.
-data DigitalSignatureAlg = RSA | DSS | ECDSA | Ed25519 | Ed448
-                           deriving (Show, Eq)
+availableECGroups :: [Group]
+availableECGroups = [P256,P384,P521,X25519,X448]
+
+-- Key-exchange signature algorithm, in close relation to ciphers
+-- (before TLS 1.3).
+data KeyExchangeSignatureAlg = KX_RSA | KX_DSS | KX_ECDSA
+                      deriving (Show, Eq)

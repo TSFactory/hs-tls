@@ -30,7 +30,6 @@ module Network.TLS.Packet
     , decodeHandshake
     , decodeDeprecatedHandshake
     , encodeHandshake
-    , encodeHandshakes
     , encodeHandshakeHeader
     , encodeHandshakeContent
 
@@ -47,6 +46,7 @@ module Network.TLS.Packet
 
     -- * generate things for packet content
     , generateMasterSecret
+    , generateExtendedMasterSec
     , generateKeyBlock
     , generateClientFinished
     , generateServerFinished
@@ -57,23 +57,29 @@ module Network.TLS.Packet
     -- * for extensions parsing
     , getSignatureHashAlgorithm
     , putSignatureHashAlgorithm
+    , getBinaryVersion
+    , putBinaryVersion
+    , getClientRandom32
+    , putClientRandom32
+    , getServerRandom32
+    , putServerRandom32
+    , getExtensions
+    , putExtension
+    , getSession
+    , putSession
+    , putDNames
+    , getDNames
     ) where
 
 import Network.TLS.Imports
 import Network.TLS.Struct
 import Network.TLS.Wire
 import Network.TLS.Cap
-import Data.Maybe (fromJust)
-import Data.Word
-import Control.Monad
-import Data.ASN1.Types (fromASN1, toASN1)
-import Data.ASN1.Encoding (decodeASN1', encodeASN1')
-import Data.ASN1.BinaryEncoding (DER(..))
 import Data.X509 (CertificateChainRaw(..), encodeCertificateChain, decodeCertificateChain)
 import Network.TLS.Crypto
 import Network.TLS.MAC
 import Network.TLS.Cipher (CipherKeyExchangeType(..), Cipher(..))
-import Data.ByteString (ByteString)
+import Network.TLS.Util.ASN1
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import           Data.ByteArray (ByteArrayAccess)
@@ -93,8 +99,14 @@ getVersion = do
         Nothing -> fail ("invalid version : " ++ show major ++ "," ++ show minor)
         Just v  -> return v
 
-putVersion :: Version -> Put
-putVersion ver = putWord8 major >> putWord8 minor
+getBinaryVersion :: Get (Maybe Version)
+getBinaryVersion = do
+    major <- getWord8
+    minor <- getWord8
+    return $ verOfNum (major, minor)
+
+putBinaryVersion :: Version -> Put
+putBinaryVersion ver = putWord8 major >> putWord8 minor
   where (major, minor) = numericalVer ver
 
 getHeaderType :: Get ProtocolType
@@ -118,7 +130,7 @@ getHandshakeType = do
  - decode and encode headers
  -}
 decodeHeader :: ByteString -> Either TLSError Header
-decodeHeader = runGetErr "header" $ liftM3 Header getHeaderType getVersion getWord16
+decodeHeader = runGetErr "header" $ Header <$> getHeaderType <*> getVersion <*> getWord16
 
 decodeDeprecatedHeaderLength :: ByteString -> Either TLSError Word16
 decodeDeprecatedHeaderLength = runGetErr "deprecatedheaderlength" $ subtract 0x8000 <$> getWord16
@@ -131,7 +143,7 @@ decodeDeprecatedHeader size =
         return $ Header ProtocolType_DeprecatedHandshake version size
 
 encodeHeader :: Header -> ByteString
-encodeHeader (Header pt ver len) = runPut (putHeaderType pt >> putVersion ver >> putWord16 len)
+encodeHeader (Header pt ver len) = runPut (putHeaderType pt >> putBinaryVersion ver >> putWord16 len)
         {- FIXME check len <= 2^14 -}
 
 encodeHeaderNoVer :: Header -> ByteString
@@ -151,12 +163,12 @@ decodeAlert = do
         (_, Nothing)     -> fail "cannot decode alert description"
 
 decodeAlerts :: ByteString -> Either TLSError [(AlertLevel, AlertDescription)]
-decodeAlerts = runGetErr "alerts" $ loop
+decodeAlerts = runGetErr "alerts" loop
   where loop = do
             r <- remaining
             if r == 0
                 then return []
-                else liftM2 (:) decodeAlert loop
+                else (:) <$> decodeAlert <*> loop
 
 encodeAlerts :: [(AlertLevel, AlertDescription)] -> ByteString
 encodeAlerts l = runPut $ mapM_ encodeAlert l
@@ -216,7 +228,7 @@ decodeClientHello = do
     compressions <- getWords8
     r            <- remaining
     exts <- if hasHelloExtensions ver && r > 0
-            then fmap fromIntegral getWord16 >>= getExtensions
+            then fromIntegral <$> getWord16 >>= getExtensions
             else return []
     return $ ClientHello ver random session ciphers compressions exts Nothing
 
@@ -229,7 +241,7 @@ decodeServerHello = do
     compressionid <- getWord8
     r             <- remaining
     exts <- if hasHelloExtensions ver && r > 0
-            then fmap fromIntegral getWord16 >>= getExtensions
+            then fromIntegral <$> getWord16 >>= getExtensions
             else return []
     return $ ServerHello ver random session cipherid compressionid exts
 
@@ -249,26 +261,27 @@ decodeFinished = Finished <$> (remaining >>= getBytes)
 
 decodeCertRequest :: CurrentParams -> Get Handshake
 decodeCertRequest cp = do
-    certTypes <- map (fromJust . valToType . fromIntegral) <$> getWords8
-
+    mcertTypes <- map (valToType . fromIntegral) <$> getWords8
+    certTypes <- mapM (fromJustM "decodeCertRequest") mcertTypes
     sigHashAlgs <- if cParamsVersion cp >= TLS12
                        then Just <$> (getWord16 >>= getSignatureHashAlgorithms)
                        else return Nothing
+    CertRequest certTypes sigHashAlgs <$> getDNames
+  where getSignatureHashAlgorithms len = getList (fromIntegral len) (getSignatureHashAlgorithm >>= \sh -> return (2, sh))
+
+-- | Decode a list CA distinguished names
+getDNames :: Get [DistinguishedName]
+getDNames = do
     dNameLen <- getWord16
     -- FIXME: Decide whether to remove this check completely or to make it an option.
     -- when (cParamsVersion cp < TLS12 && dNameLen < 3) $ fail "certrequest distinguishname not of the correct size"
-    dNames <- getList (fromIntegral dNameLen) getDName
-    return $ CertRequest certTypes sigHashAlgs dNames
-  where getSignatureHashAlgorithms len = getList (fromIntegral len) (getSignatureHashAlgorithm >>= \sh -> return (2, sh))
-        getDName = do
-            dName <- getOpaque16
-            when (B.length dName == 0) $ fail "certrequest: invalid DN length"
-            dn <- case decodeASN1' DER dName of
-                    Left e      -> fail ("cert request decoding DistinguishedName ASN1 failed: " ++ show e)
-                    Right asn1s -> case fromASN1 asn1s of
-                                        Left e      -> fail ("cert request parsing DistinguishedName ASN1 failed: " ++ show e)
-                                        Right (d,_) -> return d
-            return (2 + B.length dName, dn)
+    getList (fromIntegral dNameLen) getDName
+  where
+    getDName = do
+        dName <- getOpaque16
+        when (B.length dName == 0) $ fail "certrequest: invalid DN length"
+        dn <- either fail return $ decodeASN1Object "cert request DistinguishedName" dName
+        return (2 + B.length dName, dn)
 
 decodeCertVerify :: CurrentParams -> Get Handshake
 decodeCertVerify cp = CertVerify <$> getDigitallySigned (cParamsVersion cp)
@@ -334,14 +347,11 @@ decodeServerKeyXchg cp =
 encodeHandshake :: Handshake -> ByteString
 encodeHandshake o =
     let content = runPut $ encodeHandshakeContent o in
-    let len = fromIntegral $ B.length content in
+    let len = B.length content in
     let header = case o of
                     ClientHello _ _ _ _ _ _ (Just _) -> "" -- SSLv2 ClientHello message
                     _ -> runPut $ encodeHandshakeHeader (typeOfHandshake o) len in
     B.concat [ header, content ]
-
-encodeHandshakes :: [Handshake] -> ByteString
-encodeHandshakes hss = B.concat $ map encodeHandshake hss
 
 encodeHandshakeHeader :: HandshakeType -> Int -> Put
 encodeHandshakeHeader ty len = putWord8 (valOfType ty) >> putWord24 len
@@ -351,7 +361,7 @@ encodeHandshakeContent :: Handshake -> Put
 encodeHandshakeContent (ClientHello _ _ _ _ _ _ (Just deprecated)) = do
     putBytes deprecated
 encodeHandshakeContent (ClientHello version random session cipherIDs compressionIDs exts Nothing) = do
-    putVersion version
+    putBinaryVersion version
     putClientRandom32 random
     putSession session
     putWords16 cipherIDs
@@ -359,10 +369,14 @@ encodeHandshakeContent (ClientHello version random session cipherIDs compression
     putExtensions exts
     return ()
 
-encodeHandshakeContent (ServerHello version random session cipherid compressionID exts) =
-    putVersion version >> putServerRandom32 random >> putSession session
-                       >> putWord16 cipherid >> putWord8 compressionID
-                       >> putExtensions exts >> return ()
+encodeHandshakeContent (ServerHello version random session cipherid compressionID exts) = do
+    putBinaryVersion version
+    putServerRandom32 random
+    putSession session
+    putWord16 cipherid
+    putWord8 compressionID
+    putExtensions exts
+    return ()
 
 encodeHandshakeContent (Certificates cc) = putOpaque24 (runPut $ mapM_ putOpaque24 certs)
   where (CertificateChainRaw certs) = encodeCertificateChain cc
@@ -384,28 +398,32 @@ encodeHandshakeContent (ServerKeyXchg skg) =
         SKX_Unparsed bytes     -> putBytes bytes
         _                      -> error ("encodeHandshakeContent: cannot handle: " ++ show skg)
 
-encodeHandshakeContent (HelloRequest) = return ()
-encodeHandshakeContent (ServerHelloDone) = return ()
+encodeHandshakeContent HelloRequest    = return ()
+encodeHandshakeContent ServerHelloDone = return ()
 
 encodeHandshakeContent (CertRequest certTypes sigAlgs certAuthorities) = do
     putWords8 (map valOfType certTypes)
     case sigAlgs of
         Nothing -> return ()
-        Just l  -> putWords16 $ map (\(x,y) -> (fromIntegral $ valOfType x) * 256 + (fromIntegral $ valOfType y)) l
-    encodeCertAuthorities certAuthorities
-  where -- Convert a distinguished name to its DER encoding.
-        encodeCA dn = return $ encodeASN1' DER (toASN1 dn []) --B.concat $ L.toChunks $ encodeDN dn
-
-        -- Encode a list of distinguished names.
-        encodeCertAuthorities certAuths = do
-            enc <- mapM encodeCA certAuths
-            let totLength = sum $ map (((+) 2) . B.length) enc
-            putWord16 (fromIntegral totLength)
-            mapM_ (\ b -> putWord16 (fromIntegral (B.length b)) >> putBytes b) enc
+        Just l  -> putWords16 $ map (\(x,y) -> fromIntegral (valOfType x) * 256 + fromIntegral (valOfType y)) l
+    putDNames certAuthorities
 
 encodeHandshakeContent (CertVerify digitallySigned) = putDigitallySigned digitallySigned
 
 encodeHandshakeContent (Finished opaque) = putBytes opaque
+
+------------------------------------------------------------
+
+-- | Encode a list of distinguished names.
+putDNames :: [DistinguishedName] -> Put
+putDNames dnames = do
+    enc <- mapM encodeCA dnames
+    let totLength = sum $ map ((+) 2 . B.length) enc
+    putWord16 (fromIntegral totLength)
+    mapM_ (\ b -> putWord16 (fromIntegral (B.length b)) >> putBytes b) enc
+  where
+    -- Convert a distinguished name to its DER encoding.
+    encodeCA dn = return $ encodeASN1Object dn
 
 {- FIXME make sure it return error if not 32 available -}
 getRandom32 :: Get ByteString
@@ -455,8 +473,8 @@ putExtensions es = putOpaque16 (runPut $ mapM_ putExtension es)
 
 getSignatureHashAlgorithm :: Get HashAndSignatureAlgorithm
 getSignatureHashAlgorithm = do
-    h <- fromJust . valToType <$> getWord8
-    s <- fromJust . valToType <$> getWord8
+    h <- (valToType <$> getWord8) >>= fromJustM "getSignatureHashAlgorithm"
+    s <- (valToType <$> getWord8) >>= fromJustM "getSignatureHashAlgorithm"
     return (h,s)
 
 putSignatureHashAlgorithm :: HashAndSignatureAlgorithm -> Put
@@ -469,6 +487,7 @@ getServerDHParams = ServerDHParams <$> getBigNum16 <*> getBigNum16 <*> getBigNum
 putServerDHParams :: ServerDHParams -> Put
 putServerDHParams (ServerDHParams p g y) = mapM_ putBigNum16 [p,g,y]
 
+-- RFC 4492 Section 5.4 Server Key Exchange
 getServerECDHParams :: Get ServerECDHParams
 getServerECDHParams = do
     curveType <- getWord8
@@ -485,6 +504,7 @@ getServerECDHParams = do
         _ ->
             error "getServerECDHParams: unknown type for ECDH Params"
 
+-- RFC 4492 Section 5.4 Server Key Exchange
 putServerECDHParams :: ServerECDHParams -> Put
 putServerECDHParams (ServerECDHParams grp grppub) = do
     putWord8 3                            -- ECParameters ECCurveType
@@ -515,11 +535,11 @@ encodeChangeCipherSpec = runPut (putWord8 1)
 
 -- rsa pre master secret
 decodePreMasterSecret :: ByteString -> Either TLSError (Version, ByteString)
-decodePreMasterSecret = runGetErr "pre-master-secret" $ do
-    liftM2 (,) getVersion (getBytes 46)
+decodePreMasterSecret = runGetErr "pre-master-secret" $
+    (,) <$> getVersion <*> getBytes 46
 
 encodePreMasterSecret :: Version -> ByteString -> ByteString
-encodePreMasterSecret version bytes = runPut (putVersion version >> putBytes bytes)
+encodePreMasterSecret version bytes = runPut (putBinaryVersion version >> putBytes bytes)
 
 -- | in certain cases, we haven't manage to decode ServerKeyExchange properly,
 -- because the decoding was too eager and the cipher wasn't been set yet.
@@ -544,11 +564,11 @@ getPRF :: Version -> Cipher -> PRF
 getPRF ver ciph
     | ver < TLS12 = prf_MD5SHA1
     | maybe True (< TLS12) (cipherMinVer ciph) = prf_SHA256
-    | otherwise = prf_TLS ver $ maybe SHA256 id $ cipherPRFHash ciph
+    | otherwise = prf_TLS ver $ fromMaybe SHA256 $ cipherPRFHash ciph
 
 generateMasterSecret_SSL :: ByteArrayAccess preMaster => preMaster -> ClientRandom -> ServerRandom -> ByteString
 generateMasterSecret_SSL premasterSecret (ClientRandom c) (ServerRandom s) =
-    B.concat $ map (computeMD5) ["A","BB","CCC"]
+    B.concat $ map computeMD5 ["A","BB","CCC"]
   where computeMD5  label = hash MD5 $ B.concat [ B.convert premasterSecret, computeSHA1 label ]
         computeSHA1 label = hash SHA1 $ B.concat [ label, B.convert premasterSecret, c, s ]
 
@@ -567,6 +587,16 @@ generateMasterSecret :: ByteArrayAccess preMaster
 generateMasterSecret SSL2 _ = generateMasterSecret_SSL
 generateMasterSecret SSL3 _ = generateMasterSecret_SSL
 generateMasterSecret v    c = generateMasterSecret_TLS $ getPRF v c
+
+generateExtendedMasterSec :: ByteArrayAccess preMaster
+                          => Version
+                          -> Cipher
+                          -> preMaster
+                          -> ByteString
+                          -> ByteString
+generateExtendedMasterSec v c premasterSecret sessionHash =
+    getPRF v c (B.convert premasterSecret) seed 48
+  where seed = B.append "extended master secret" sessionHash
 
 generateKeyBlock_TLS :: PRF -> ClientRandom -> ServerRandom -> ByteString -> Int -> ByteString
 generateKeyBlock_TLS prf (ClientRandom c) (ServerRandom s) mastersecret kbsize =
@@ -647,3 +677,7 @@ encodeSignedDHParams dhparams cran sran = runPut $
 encodeSignedECDHParams :: ServerECDHParams -> ClientRandom -> ServerRandom -> ByteString
 encodeSignedECDHParams dhparams cran sran = runPut $
     putClientRandom32 cran >> putServerRandom32 sran >> putServerECDHParams dhparams
+
+fromJustM :: MonadFail m => String -> Maybe a -> m a
+fromJustM what Nothing  = fail ("fromJustM " ++ what ++ ": Nothing")
+fromJustM _    (Just x) = return x

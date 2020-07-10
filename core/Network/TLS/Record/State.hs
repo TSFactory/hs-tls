@@ -9,12 +9,16 @@
 --
 module Network.TLS.Record.State
     ( CryptState(..)
+    , CryptLevel(..)
+    , HasCryptLevel(..)
     , MacState(..)
+    , RecordOptions(..)
     , RecordState(..)
     , newRecordState
     , incrRecordState
     , RecordM
     , runRecordM
+    , getRecordOptions
     , getRecordVersion
     , setRecordIV
     , withCompression
@@ -24,8 +28,6 @@ module Network.TLS.Record.State
     , getMacSequence
     ) where
 
-import Data.Word
-import Control.Applicative
 import Control.Monad.State.Strict
 import Network.TLS.Compression
 import Network.TLS.Cipher
@@ -36,13 +38,16 @@ import Network.TLS.Wire
 import Network.TLS.Packet
 import Network.TLS.MAC
 import Network.TLS.Util
+import Network.TLS.Imports
+import Network.TLS.Types
 
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 
 data CryptState = CryptState
     { cstKey        :: !BulkState
     , cstIV         :: !ByteString
+    -- In TLS 1.2 or earlier, this holds mac secret.
+    -- In TLS 1.3, this holds application traffic secret N.
     , cstMacSecret  :: !ByteString
     } deriving (Show)
 
@@ -50,14 +55,34 @@ newtype MacState = MacState
     { msSequence :: Word64
     } deriving (Show)
 
+data RecordOptions = RecordOptions
+    { recordVersion :: Version                -- version to use when sending/receiving
+    , recordTLS13 :: Bool                     -- TLS13 record processing
+    }
+
+-- | TLS encryption level.
+data CryptLevel
+    = CryptInitial            -- ^ Unprotected traffic
+    | CryptMasterSecret       -- ^ Protected with master secret (TLS < 1.3)
+    | CryptEarlySecret        -- ^ Protected with early traffic secret (TLS 1.3)
+    | CryptHandshakeSecret    -- ^ Protected with handshake traffic secret (TLS 1.3)
+    | CryptApplicationSecret  -- ^ Protected with application traffic secret (TLS 1.3)
+    deriving (Eq,Show)
+
+class HasCryptLevel a where getCryptLevel :: proxy a -> CryptLevel
+instance HasCryptLevel EarlySecret where getCryptLevel _ = CryptEarlySecret
+instance HasCryptLevel HandshakeSecret where getCryptLevel _ = CryptHandshakeSecret
+instance HasCryptLevel ApplicationSecret where getCryptLevel _ = CryptApplicationSecret
+
 data RecordState = RecordState
     { stCipher      :: Maybe Cipher
     , stCompression :: Compression
+    , stCryptLevel  :: !CryptLevel
     , stCryptState  :: !CryptState
     , stMacState    :: !MacState
     } deriving (Show)
 
-newtype RecordM a = RecordM { runRecordM :: Version
+newtype RecordM a = RecordM { runRecordM :: RecordOptions
                                          -> RecordState
                                          -> Either TLSError (a, RecordState) }
 
@@ -67,19 +92,22 @@ instance Applicative RecordM where
 
 instance Monad RecordM where
     return a  = RecordM $ \_ st  -> Right (a, st)
-    m1 >>= m2 = RecordM $ \ver st -> do
-                    case runRecordM m1 ver st of
+    m1 >>= m2 = RecordM $ \opt st ->
+                    case runRecordM m1 opt st of
                         Left err       -> Left err
-                        Right (a, st2) -> runRecordM (m2 a) ver st2
+                        Right (a, st2) -> runRecordM (m2 a) opt st2
 
 instance Functor RecordM where
-    fmap f m = RecordM $ \ver st ->
-                case runRecordM m ver st of
+    fmap f m = RecordM $ \opt st ->
+                case runRecordM m opt st of
                     Left err       -> Left err
                     Right (a, st2) -> Right (f a, st2)
 
+getRecordOptions :: RecordM RecordOptions
+getRecordOptions = RecordM $ \opt st -> Right (opt, st)
+
 getRecordVersion :: RecordM Version
-getRecordVersion = RecordM $ \ver st -> Right (ver, st)
+getRecordVersion = recordVersion <$> getRecordOptions
 
 instance MonadState RecordState RecordM where
     put x = RecordM $ \_  _  -> Right ((), x)
@@ -90,15 +118,16 @@ instance MonadState RecordState RecordM where
 
 instance MonadError TLSError RecordM where
     throwError e   = RecordM $ \_ _ -> Left e
-    catchError m f = RecordM $ \ver st ->
-                        case runRecordM m ver st of
-                            Left err -> runRecordM (f err) ver st
+    catchError m f = RecordM $ \opt st ->
+                        case runRecordM m opt st of
+                            Left err -> runRecordM (f err) opt st
                             r        -> r
 
 newRecordState :: RecordState
 newRecordState = RecordState
     { stCipher      = Nothing
     , stCompression = nullCompression
+    , stCryptLevel  = CryptInitial
     , stCryptState  = CryptState BulkStateUninitialized B.empty B.empty
     , stMacState    = MacState 0
     }

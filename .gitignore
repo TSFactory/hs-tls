@@ -2,6 +2,7 @@ dist
 .stack-work
 .cabal-sandbox
 cabal.sandbox.config
+dist-newstyle/
 *.o
 *.hi
 *.tix
@@ -10,6 +11,8 @@ cabal.sandbox.config
 *.csr
 *.crt
 *.key
+stack.yaml.lock
 test-scripts/TestClient
 test-scripts/openssl-server
 test-scripts/openssl-client
+.travis.yml.sav

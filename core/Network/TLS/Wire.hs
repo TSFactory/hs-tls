@@ -23,6 +23,7 @@ module Network.TLS.Wire
     , getWords16
     , getWord24
     , getWord32
+    , getWord64
     , getBytes
     , getOpaque8
     , getOpaque16
@@ -40,6 +41,7 @@ module Network.TLS.Wire
     , putWords16
     , putWord24
     , putWord32
+    , putWord64
     , putBytes
     , putOpaque8
     , putOpaque16
@@ -54,13 +56,9 @@ module Network.TLS.Wire
 import Data.Serialize.Get hiding (runGet)
 import qualified Data.Serialize.Get as G
 import Data.Serialize.Put
-import Control.Applicative ((<$>))
-import Control.Monad
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import Data.Word
-import Data.Bits
 import Network.TLS.Struct
+import Network.TLS.Imports
 import Network.TLS.Util.Serialization
 
 type GetContinuation a = ByteString -> GetResult a
@@ -110,6 +108,9 @@ getWord24 = do
 getWord32 :: Get Word32
 getWord32 = getWord32be
 
+getWord64 :: Get Word64
+getWord64 = getWord64be
+
 getOpaque8 :: Get ByteString
 getOpaque8 = getWord8 >>= getBytes . fromIntegral
 
@@ -125,12 +126,12 @@ getInteger16 = os2ip <$> getOpaque16
 getBigNum16 :: Get BigNum
 getBigNum16 = BigNum <$> getOpaque16
 
-getList :: Int -> (Get (Int, a)) -> Get [a]
+getList :: Int -> Get (Int, a) -> Get [a]
 getList totalLen getElement = isolate totalLen (getElements totalLen)
   where getElements len
             | len < 0     = error "list consumed too much data. should never happen with isolate."
             | len == 0    = return []
-            | otherwise   = getElement >>= \(elementLen, a) -> liftM ((:) a) (getElements (len - elementLen))
+            | otherwise   = getElement >>= \(elementLen, a) -> (:) a <$> getElements (len - elementLen)
 
 processBytes :: Int -> Get a -> Get a
 processBytes i f = isolate i f
@@ -146,9 +147,12 @@ putWord16 = putWord16be
 putWord32 :: Word32 -> Put
 putWord32 = putWord32be
 
+putWord64 :: Word64 -> Put
+putWord64 = putWord64be
+
 putWords16 :: [Word16] -> Put
 putWords16 l = do
-    putWord16 $ 2 * (fromIntegral $ length l)
+    putWord16 $ 2 * fromIntegral (length l)
     mapM_ putWord16 l
 
 putWord24 :: Int -> Put

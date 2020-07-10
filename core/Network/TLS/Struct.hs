@@ -18,10 +18,12 @@ module Network.TLS.Struct
     , ExtensionID
     , ExtensionRaw(..)
     , CertificateType(..)
+    , lastSupportedCertificateType
     , HashAlgorithm(..)
     , SignatureAlgorithm(..)
     , HashAndSignatureAlgorithm
     , DigitallySigned(..)
+    , Signature
     , ProtocolType(..)
     , TLSError(..)
     , TLSException(..)
@@ -41,8 +43,6 @@ module Network.TLS.Struct
     , Header(..)
     , ServerRandom(..)
     , ClientRandom(..)
-    , serverRandom
-    , clientRandom
     , FinishedData
     , SessionID
     , Session(..)
@@ -60,9 +60,6 @@ module Network.TLS.Struct
     , typeOfHandshake
     ) where
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as B (length)
-import Data.Word
 import Data.X509 (CertificateChain, DistinguishedName)
 import Data.Typeable
 import Control.Exception (Exception(..), SomeException)
@@ -81,19 +78,43 @@ data CipherType = CipherStream | CipherBlock | CipherAEAD
 data CipherData = CipherData
     { cipherDataContent :: ByteString
     , cipherDataMAC     :: Maybe ByteString
-    , cipherDataPadding :: Maybe ByteString
+    , cipherDataPadding :: Maybe (ByteString, Int)
     } deriving (Show,Eq)
 
+-- | Some of the IANA registered code points for 'CertificateType' are not
+-- currently supported by the library.  Nor should they be, they're are either
+-- unwise, obsolete or both.  There's no point in conveying these to the user
+-- in the client certificate request callback.  The request callback will be
+-- filtered to exclude unsupported values.  If the user cannot find a certificate
+-- for a supported code point, we'll go ahead without a client certificate and
+-- hope for the best, unless the user's callback decides to throw an exception.
+--
 data CertificateType =
-      CertificateType_RSA_Sign         -- TLS10
-    | CertificateType_DSS_Sign         -- TLS10
-    | CertificateType_RSA_Fixed_DH     -- TLS10
-    | CertificateType_DSS_Fixed_DH     -- TLS10
-    | CertificateType_RSA_Ephemeral_DH -- TLS12
-    | CertificateType_DSS_Ephemeral_DH -- TLS12
-    | CertificateType_fortezza_dms     -- TLS12
-    | CertificateType_Unknown Word8
-    deriving (Show,Eq)
+      CertificateType_RSA_Sign         -- ^ TLS10 and up, RFC5246
+    | CertificateType_DSS_Sign         -- ^ TLS10 and up, RFC5246
+    | CertificateType_ECDSA_Sign       -- ^ TLS10 and up, RFC8422
+    | CertificateType_Ed25519_Sign     -- ^ TLS13 and up, synthetic
+    | CertificateType_Ed448_Sign       -- ^ TLS13 and up, synthetic
+    -- | None of the below will ever be presented to the callback.  Any future
+    -- public key algorithms valid for client certificates go above this line.
+    | CertificateType_RSA_Fixed_DH     -- Obsolete, unsupported
+    | CertificateType_DSS_Fixed_DH     -- Obsolete, unsupported
+    | CertificateType_RSA_Ephemeral_DH -- Obsolete, unsupported
+    | CertificateType_DSS_Ephemeral_DH -- Obsolete, unsupported
+    | CertificateType_fortezza_dms     -- Obsolete, unsupported
+    | CertificateType_RSA_Fixed_ECDH   -- Obsolete, unsupported
+    | CertificateType_ECDSA_Fixed_ECDH -- Obsolete, unsupported
+    | CertificateType_Unknown Word8    -- Obsolete, unsupported
+    deriving (Eq, Ord, Show)
+
+-- | Last supported certificate type, no 'CertificateType that
+-- compares greater than this one (based on the 'Ord' instance,
+-- not on the wire code point) will be reported to the application
+-- via the client certificate request callback.
+--
+lastSupportedCertificateType :: CertificateType
+lastSupportedCertificateType = CertificateType_ECDSA_Sign
+
 
 data HashAlgorithm =
       HashNone
@@ -112,15 +133,20 @@ data SignatureAlgorithm =
     | SignatureRSA
     | SignatureDSS
     | SignatureECDSA
-    | SignatureRSApssSHA256
-    | SignatureRSApssSHA384
-    | SignatureRSApssSHA512
+    | SignatureRSApssRSAeSHA256
+    | SignatureRSApssRSAeSHA384
+    | SignatureRSApssRSAeSHA512
     | SignatureEd25519
     | SignatureEd448
+    | SignatureRSApsspssSHA256
+    | SignatureRSApsspssSHA384
+    | SignatureRSApsspssSHA512
     | SignatureOther Word8
     deriving (Show,Eq)
 
 type HashAndSignatureAlgorithm = (HashAlgorithm, SignatureAlgorithm)
+
+------------------------------------------------------------
 
 type Signature = ByteString
 
@@ -182,22 +208,56 @@ newtype ClientRandom = ClientRandom { unClientRandom :: ByteString } deriving (S
 newtype Session = Session (Maybe SessionID) deriving (Show, Eq)
 
 type FinishedData = ByteString
+
+-- | Identifier of a TLS extension.
 type ExtensionID  = Word16
 
+-- | The raw content of a TLS extension.
 data ExtensionRaw = ExtensionRaw ExtensionID ByteString
     deriving (Eq)
 
 instance Show ExtensionRaw where
-    show (ExtensionRaw eid bs) = "ExtensionRaw " ++ show eid ++ " " ++ showBytesHex bs ++ ""
+    show (ExtensionRaw eid bs) = "ExtensionRaw " ++ showEID eid ++ " " ++ showBytesHex bs
 
-constrRandom32 :: (ByteString -> a) -> ByteString -> Maybe a
-constrRandom32 constr l = if B.length l == 32 then Just (constr l) else Nothing
-
-serverRandom :: ByteString -> Maybe ServerRandom
-serverRandom l = constrRandom32 ServerRandom l
-
-clientRandom :: ByteString -> Maybe ClientRandom
-clientRandom l = constrRandom32 ClientRandom l
+showEID :: ExtensionID -> String
+showEID 0x0 = "ServerName"
+showEID 0x1 = "MaxFragmentLength"
+showEID 0x2 = "ClientCertificateUrl"
+showEID 0x3 = "TrustedCAKeys"
+showEID 0x4 = "TruncatedHMAC"
+showEID 0x5 = "StatusRequest"
+showEID 0x6 = "UserMapping"
+showEID 0x7 = "ClientAuthz"
+showEID 0x8 = "ServerAuthz"
+showEID 0x9 = "CertType"
+showEID 0xa = "NegotiatedGroups"
+showEID 0xb = "EcPointFormats"
+showEID 0xc = "SRP"
+showEID 0xd = "SignatureAlgorithm"
+showEID 0xe = "SRTP"
+showEID 0xf = "Heartbeat"
+showEID 0x10 = "ApplicationLayerProtocolNegotiation"
+showEID 0x11 = "StatusRequestv2"
+showEID 0x12 = "SignedCertificateTimestamp"
+showEID 0x13 = "ClientCertificateType"
+showEID 0x14 = "ServerCertificateType"
+showEID 0x15 = "Padding"
+showEID 0x16 = "EncryptThenMAC"
+showEID 0x17 = "ExtendedMasterSecret"
+showEID 0x23 = "SessionTicket"
+showEID 0x29 = "PreShardeKey"
+showEID 0x2a = "EarlyData"
+showEID 0x2b = "SupportedVersions"
+showEID 0x2c = "Cookie"
+showEID 0x2d = "PskKeyExchangeModes"
+showEID 0x2f = "CertificateAuthorities"
+showEID 0x30 = "OidFilters"
+showEID 0x31 = "PostHandshakeAuth"
+showEID 0x32 = "SignatureAlgorithmsCert"
+showEID 0x33 = "KeyShare"
+showEID 0xff01 = "SecureRenegotiation"
+showEID 0xffa5 = "QuicTransportParameters"
+showEID x      = show x
 
 data AlertLevel =
       AlertLevel_Warning
@@ -229,11 +289,15 @@ data AlertDescription =
     | InappropriateFallback -- RFC7507
     | UserCanceled
     | NoRenegotiation
+    | MissingExtension
     | UnsupportedExtension
     | CertificateUnobtainable
     | UnrecognizedName
     | BadCertificateStatusResponse
     | BadCertificateHashValue
+    | UnknownPskIdentity
+    | CertificateRequired
+    | NoApplicationProtocol -- RFC7301
     deriving (Show,Eq)
 
 data HandshakeType =
@@ -328,16 +392,16 @@ packetType ChangeCipherSpec = ProtocolType_ChangeCipherSpec
 packetType (AppData _)      = ProtocolType_AppData
 
 typeOfHandshake :: Handshake -> HandshakeType
-typeOfHandshake (ClientHello {})             = HandshakeType_ClientHello
-typeOfHandshake (ServerHello {})             = HandshakeType_ServerHello
-typeOfHandshake (Certificates {})            = HandshakeType_Certificate
-typeOfHandshake HelloRequest                 = HandshakeType_HelloRequest
-typeOfHandshake (ServerHelloDone)            = HandshakeType_ServerHelloDone
-typeOfHandshake (ClientKeyXchg {})           = HandshakeType_ClientKeyXchg
-typeOfHandshake (ServerKeyXchg {})           = HandshakeType_ServerKeyXchg
-typeOfHandshake (CertRequest {})             = HandshakeType_CertRequest
-typeOfHandshake (CertVerify {})              = HandshakeType_CertVerify
-typeOfHandshake (Finished {})                = HandshakeType_Finished
+typeOfHandshake ClientHello{}             = HandshakeType_ClientHello
+typeOfHandshake ServerHello{}             = HandshakeType_ServerHello
+typeOfHandshake Certificates{}            = HandshakeType_Certificate
+typeOfHandshake HelloRequest              = HandshakeType_HelloRequest
+typeOfHandshake ServerHelloDone           = HandshakeType_ServerHelloDone
+typeOfHandshake ClientKeyXchg{}           = HandshakeType_ClientKeyXchg
+typeOfHandshake ServerKeyXchg{}           = HandshakeType_ServerKeyXchg
+typeOfHandshake CertRequest{}             = HandshakeType_CertRequest
+typeOfHandshake CertVerify{}              = HandshakeType_CertVerify
+typeOfHandshake Finished{}                = HandshakeType_Finished
 
 numericalVer :: Version -> (Word8, Word8)
 numericalVer SSL2  = (2, 0)
@@ -345,6 +409,7 @@ numericalVer SSL3  = (3, 0)
 numericalVer TLS10 = (3, 1)
 numericalVer TLS11 = (3, 2)
 numericalVer TLS12 = (3, 3)
+numericalVer TLS13 = (3, 4)
 
 verOfNum :: (Word8, Word8) -> Maybe Version
 verOfNum (2, 0) = Just SSL2
@@ -352,6 +417,7 @@ verOfNum (3, 0) = Just SSL3
 verOfNum (3, 1) = Just TLS10
 verOfNum (3, 2) = Just TLS11
 verOfNum (3, 3) = Just TLS12
+verOfNum (3, 4) = Just TLS13
 verOfNum _      = Nothing
 
 class TypeValuable a where
@@ -455,11 +521,15 @@ instance TypeValuable AlertDescription where
     valOfType InappropriateFallback  = 86
     valOfType UserCanceled           = 90
     valOfType NoRenegotiation        = 100
+    valOfType MissingExtension       = 109
     valOfType UnsupportedExtension   = 110
     valOfType CertificateUnobtainable = 111
     valOfType UnrecognizedName        = 112
     valOfType BadCertificateStatusResponse = 113
     valOfType BadCertificateHashValue = 114
+    valOfType UnknownPskIdentity      = 115
+    valOfType CertificateRequired     = 116
+    valOfType NoApplicationProtocol   = 120
 
     valToType 0   = Just CloseNotify
     valToType 10  = Just UnexpectedMessage
@@ -485,22 +555,35 @@ instance TypeValuable AlertDescription where
     valToType 86  = Just InappropriateFallback
     valToType 90  = Just UserCanceled
     valToType 100 = Just NoRenegotiation
+    valToType 109 = Just MissingExtension
     valToType 110 = Just UnsupportedExtension
     valToType 111 = Just CertificateUnobtainable
     valToType 112 = Just UnrecognizedName
     valToType 113 = Just BadCertificateStatusResponse
     valToType 114 = Just BadCertificateHashValue
+    valToType 115 = Just UnknownPskIdentity
+    valToType 116 = Just CertificateRequired
+    valToType 120 = Just NoApplicationProtocol
     valToType _   = Nothing
 
 instance TypeValuable CertificateType where
     valOfType CertificateType_RSA_Sign         = 1
+    valOfType CertificateType_ECDSA_Sign       = 64
     valOfType CertificateType_DSS_Sign         = 2
     valOfType CertificateType_RSA_Fixed_DH     = 3
     valOfType CertificateType_DSS_Fixed_DH     = 4
     valOfType CertificateType_RSA_Ephemeral_DH = 5
     valOfType CertificateType_DSS_Ephemeral_DH = 6
     valOfType CertificateType_fortezza_dms     = 20
+    valOfType CertificateType_RSA_Fixed_ECDH   = 65
+    valOfType CertificateType_ECDSA_Fixed_ECDH = 66
     valOfType (CertificateType_Unknown i)      = i
+    -- | There are no code points that map to the below synthetic types, these
+    -- are inferred indirectly from the @signature_algorithms@ extension of the
+    -- TLS 1.3 @CertificateRequest@ message.  the value assignments are there
+    -- only to avoid partial function warnings.
+    valOfType CertificateType_Ed25519_Sign     = 0
+    valOfType CertificateType_Ed448_Sign       = 0
 
     valToType 1  = Just CertificateType_RSA_Sign
     valToType 2  = Just CertificateType_DSS_Sign
@@ -509,7 +592,17 @@ instance TypeValuable CertificateType where
     valToType 5  = Just CertificateType_RSA_Ephemeral_DH
     valToType 6  = Just CertificateType_DSS_Ephemeral_DH
     valToType 20 = Just CertificateType_fortezza_dms
+    valToType 64 = Just CertificateType_ECDSA_Sign
+    valToType 65 = Just CertificateType_RSA_Fixed_ECDH
+    valToType 66 = Just CertificateType_ECDSA_Fixed_ECDH
     valToType i  = Just (CertificateType_Unknown i)
+    -- | There are no code points that map to the below synthetic types, these
+    -- are inferred indirectly from the @signature_algorithms@ extension of the
+    -- TLS 1.3 @CertificateRequest@ message.
+    -- @
+    -- CertificateType_Ed25519_Sign
+    -- CertificateType_Ed448_Sign
+    -- @
 
 instance TypeValuable HashAlgorithm where
     valOfType HashNone      = 0
@@ -533,27 +626,33 @@ instance TypeValuable HashAlgorithm where
     valToType i = Just (HashOther i)
 
 instance TypeValuable SignatureAlgorithm where
-    valOfType SignatureAnonymous    = 0
-    valOfType SignatureRSA          = 1
-    valOfType SignatureDSS          = 2
-    valOfType SignatureECDSA        = 3
-    valOfType SignatureRSApssSHA256 = 4
-    valOfType SignatureRSApssSHA384 = 5
-    valOfType SignatureRSApssSHA512 = 6
-    valOfType SignatureEd25519      = 7
-    valOfType SignatureEd448        = 8
-    valOfType (SignatureOther i)    = i
+    valOfType SignatureAnonymous        =  0
+    valOfType SignatureRSA              =  1
+    valOfType SignatureDSS              =  2
+    valOfType SignatureECDSA            =  3
+    valOfType SignatureRSApssRSAeSHA256 =  4
+    valOfType SignatureRSApssRSAeSHA384 =  5
+    valOfType SignatureRSApssRSAeSHA512 =  6
+    valOfType SignatureEd25519          =  7
+    valOfType SignatureEd448            =  8
+    valOfType SignatureRSApsspssSHA256  =  9
+    valOfType SignatureRSApsspssSHA384  = 10
+    valOfType SignatureRSApsspssSHA512  = 11
+    valOfType (SignatureOther i)        =  i
 
-    valToType 0 = Just SignatureAnonymous
-    valToType 1 = Just SignatureRSA
-    valToType 2 = Just SignatureDSS
-    valToType 3 = Just SignatureECDSA
-    valToType 4 = Just SignatureRSApssSHA256
-    valToType 5 = Just SignatureRSApssSHA384
-    valToType 6 = Just SignatureRSApssSHA512
-    valToType 7 = Just SignatureEd25519
-    valToType 8 = Just SignatureEd448
-    valToType i = Just (SignatureOther i)
+    valToType  0 = Just SignatureAnonymous
+    valToType  1 = Just SignatureRSA
+    valToType  2 = Just SignatureDSS
+    valToType  3 = Just SignatureECDSA
+    valToType  4 = Just SignatureRSApssRSAeSHA256
+    valToType  5 = Just SignatureRSApssRSAeSHA384
+    valToType  6 = Just SignatureRSApssRSAeSHA512
+    valToType  7 = Just SignatureEd25519
+    valToType  8 = Just SignatureEd448
+    valToType  9 = Just SignatureRSApsspssSHA256
+    valToType 10 = Just SignatureRSApsspssSHA384
+    valToType 11 = Just SignatureRSApsspssSHA512
+    valToType  i = Just (SignatureOther i)
 
 instance EnumSafe16 Group where
     fromEnumSafe16 P256      =  23

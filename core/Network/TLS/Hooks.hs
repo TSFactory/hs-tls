@@ -12,7 +12,8 @@ module Network.TLS.Hooks
     ) where
 
 import qualified Data.ByteString as B
-import Network.TLS.Struct (Header, Handshake(..))
+import Network.TLS.Struct (Header, Handshake)
+import Network.TLS.Struct13 (Handshake13)
 import Network.TLS.X509 (CertificateChain)
 import Data.Default.Class
 
@@ -28,10 +29,10 @@ data Logging = Logging
 
 defaultLogging :: Logging
 defaultLogging = Logging
-    { loggingPacketSent = (\_ -> return ())
-    , loggingPacketRecv = (\_ -> return ())
-    , loggingIOSent     = (\_ -> return ())
-    , loggingIORecv     = (\_ _ -> return ())
+    { loggingPacketSent = \_ -> return ()
+    , loggingPacketRecv = \_ -> return ()
+    , loggingIOSent     = \_ -> return ()
+    , loggingIORecv     = \_ _ -> return ()
     }
 
 instance Default Logging where
@@ -41,6 +42,8 @@ instance Default Logging where
 data Hooks = Hooks
     { -- | called at each handshake message received
       hookRecvHandshake    :: Handshake -> IO Handshake
+      -- | called at each handshake message received for TLS 1.3
+    , hookRecvHandshake13  :: Handshake13 -> IO Handshake13
       -- | called at each certificate chain message received
     , hookRecvCertificates :: CertificateChain -> IO ()
       -- | hooks on IO and packets, receiving and sending.
@@ -49,7 +52,8 @@ data Hooks = Hooks
 
 defaultHooks :: Hooks
 defaultHooks = Hooks
-    { hookRecvHandshake    = \hs -> return hs
+    { hookRecvHandshake    = return
+    , hookRecvHandshake13  = return
     , hookRecvCertificates = return . const ()
     , hookLogging          = def
     }
